@@ -1,0 +1,365 @@
+.env :
+# Replace the following with your actual MongoDB connection string
+# It's recommended to use a cloud provider like MongoDB Atlas for a free cluster.
+MONGO_URI="mongodb+srv://ecommerce:ecommerce@cluster0.jcfuk.mongodb.net/?retryWrites=true&w=majority&appName=Cluster0"
+PORT=5000
+
+--------------------------------------------------
+
+.gitignore :
+node_modules
+.env
+
+--------------------------------------------------
+
+index.js :
+require('dotenv').config();
+const express = require('express');
+const cors = require('cors');
+const helmet = require('helmet');
+const rateLimit = require('express-rate-limit');
+const mongoSanitize = require('express-mongo-sanitize');
+const morgan = require('morgan');
+
+const connectDB = require('./config/db');
+const logger = require('./config/logger');
+const errorHandler = require('./middleware/errorHandler');
+
+// Connect to Database
+connectDB();
+
+const app = express();
+
+// --- Core Middleware ---
+app.use(express.json());
+app.use(express.urlencoded({ extended: false }));
+app.use(helmet());
+
+// --- Security Middleware ---
+// Sanitize user-supplied data to prevent MongoDB operator injection
+app.use(mongoSanitize());
+
+// CORS Configuration
+const allowedOrigins = [
+    'http://localhost:5173',
+    'http://127.0.0.1:5173',
+    // Add your production domain here: e.g., 'https://your-vision-ai-app.com'
+];
+app.use(cors({
+    origin: function (origin, callback) {
+        if (!origin || allowedOrigins.indexOf(origin) !== -1) {
+            callback(null, true);
+        } else {
+            callback(new Error('Not allowed by CORS'));
+        }
+    }
+}));
+
+// Rate Limiting
+const limiter = rateLimit({
+    windowMs: 15 * 60 * 1000, // 15 minutes
+    max: 100, // Limit each IP to 100 requests per windowMs
+    standardHeaders: true,
+    legacyHeaders: false,
+    message: 'Too many requests from this IP, please try again after 15 minutes',
+});
+app.use(limiter);
+
+// --- Logging ---
+// Use morgan to log HTTP requests to the winston logger
+app.use(morgan('combined', { stream: logger.stream }));
+
+// --- API Routes ---
+app.get('/', (req, res) => res.json({ status: "VisionAI API is healthy" }));
+app.use('/api', require('./routes/apiRoutes'));
+
+// --- Error Handler ---
+app.use(errorHandler);
+
+const PORT = process.env.PORT || 5000;
+app.listen(PORT, '0.0.0.0', () => logger.info(`🚀 Server running on port ${PORT}`));
+
+--------------------------------------------------
+
+package.json :
+{
+  "name": "server",
+  "version": "1.0.1",
+  "description": "VisionAI Backend API",
+  "main": "index.js",
+  "scripts": {
+    "start": "node index.js",
+    "dev": "nodemon index.js"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "type": "commonjs",
+  "dependencies": {
+    "cors": "^2.8.5",
+    "dotenv": "^16.6.1",
+    "express": "^4.22.1",
+    "express-mongo-sanitize": "^2.2.0",
+    "express-rate-limit": "^8.2.1",
+    "helmet": "^7.2.0",
+    "joi": "^17.13.3",
+    "mongoose": "^8.21.0",
+    "morgan": "^1.10.1",
+    "winston": "^3.19.0"
+  },
+  "devDependencies": {
+    "nodemon": "^3.1.0"
+  }
+}
+
+
+--------------------------------------------------
+
+config\db.js :
+const mongoose = require('mongoose');
+
+const connectDB = async () => {
+    try {
+        const conn = await mongoose.connect(process.env.MONGO_URI);
+        console.log(`✅ MongoDB Connected: ${conn.connection.host}`);
+    } catch (error) {
+        console.error(`❌ DB Error: ${error.message}`);
+        process.exit(1);
+    }
+};
+
+module.exports = connectDB;
+
+--------------------------------------------------
+
+config\logger.js :
+const winston = require('winston');
+
+const levels = {
+    error: 0,
+    warn: 1,
+    info: 2,
+    http: 3,
+    debug: 4,
+};
+
+const level = () => {
+    const env = process.env.NODE_ENV || 'development';
+    return env === 'development' ? 'debug' : 'warn';
+};
+
+const colors = {
+    error: 'red',
+    warn: 'yellow',
+    info: 'green',
+    http: 'magenta',
+    debug: 'white',
+};
+winston.addColors(colors);
+
+const format = winston.format.combine(
+    winston.format.timestamp({ format: 'YYYY-MM-DD HH:mm:ss:ms' }),
+    winston.format.colorize({ all: true }),
+    winston.format.printf(
+        (info) => `${info.timestamp} ${info.level}: ${info.message}`
+    )
+);
+
+const transports = [
+    new winston.transports.Console(),
+    new winston.transports.File({
+        filename: 'logs/error.log',
+        level: 'error',
+    }),
+    new winston.transports.File({ filename: 'logs/all.log' }),
+];
+
+const logger = winston.createLogger({
+    level: level(),
+    levels,
+    format,
+    transports,
+});
+
+// Create a stream object with a 'write' function that will be used by `morgan`
+logger.stream = {
+    write: function (message, encoding) {
+        logger.http(message.trim());
+    },
+};
+
+module.exports = logger;
+
+--------------------------------------------------
+
+controllers\logController.js :
+const Joi = require('joi');
+const Log = require('../models/Log');
+const asyncHandler = require('../middleware/asyncHandler');
+
+// Validation schema for logging a hazard
+const hazardSchema = Joi.object({
+    lat: Joi.number().required(),
+    lng: Joi.number().required(),
+    note: Joi.string().min(2).max(50).required(),
+});
+
+// Validation schema for an SOS signal
+const sosSchema = Joi.object({
+    lat: Joi.number().required(),
+    lng: Joi.number().required(),
+});
+
+// @desc    Log a detected hazard
+// @route   POST /api/log-hazard
+// @access  Public
+exports.logHazard = asyncHandler(async (req, res, next) => {
+    const { error, value } = hazardSchema.validate(req.body);
+    if (error) {
+        return res.status(400).json({ error: error.details[0].message });
+    }
+
+    const log = await Log.create({ ...value, type: 'hazard' });
+    res.status(201).json({ msg: "Hazard logged successfully", data: log });
+});
+
+// @desc    Receive an SOS signal
+// @route   POST /api/sos
+// @access  Public
+exports.sendSOS = asyncHandler(async (req, res, next) => {
+    const { error, value } = sosSchema.validate(req.body);
+    if (error) {
+        return res.status(400).json({ error: error.details[0].message });
+    }
+
+    console.log("⚠️ SOS TRIGGERED ⚠️", value);
+
+    const log = await Log.create({
+        ...value,
+        type: 'sos',
+        note: 'SOS Triggered by user',
+    });
+
+    // Future enhancement: Integrate with Twilio, SendGrid, etc., to send SMS/email alerts.
+
+    res.status(200).json({ msg: "SOS signal received and logged" });
+});
+
+--------------------------------------------------
+
+logs\all.log :
+2026-01-16 14:48:20:4820 [32minfo[39m: [32m🚀 Server running on port 5000[39m
+2026-01-16 14:59:47:5947 [32minfo[39m: [32m🚀 Server running on port 5000[39m
+2026-01-16 15:04:15:415 [32minfo[39m: [32m🚀 Server running on port 5000[39m
+2026-01-16 15:05:43:543 [32minfo[39m: [32m🚀 Server running on port 5000[39m
+2026-01-16 15:06:07:67 [35mhttp[39m: [35m127.0.0.1 - - [16/Jan/2026:09:36:07 +0000] "POST /api/sos HTTP/1.1" 200 40 "http://localhost:5173/" "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/143.0.0.0 Safari/537.36"[39m
+2026-01-17 07:38:07:387 [32minfo[39m: [32m🚀 Server running on port 5000[39m
+
+
+--------------------------------------------------
+
+logs\error.log :
+
+
+--------------------------------------------------
+
+middleware\asyncHandler.js :
+const asyncHandler = (fn) => (req, res, next) =>
+    Promise.resolve(fn(req, res, next)).catch(next);
+
+module.exports = asyncHandler;
+
+--------------------------------------------------
+
+middleware\errorHandler.js :
+const logger = require('../config/logger');
+
+const errorHandler = (err, req, res, next) => {
+    let error = { ...err };
+    error.message = err.message;
+
+    // Log the full error for the developer
+    logger.error(err.stack);
+
+    // Mongoose bad ObjectId
+    if (err.name === 'CastError') {
+        const message = `Resource not found with id of ${err.value}`;
+        error = { statusCode: 404, message };
+    }
+
+    // Mongoose duplicate key
+    if (err.code === 11000) {
+        const message = 'Duplicate field value entered';
+        error = { statusCode: 400, message };
+    }
+
+    // Mongoose validation error
+    if (err.name === 'ValidationError') {
+        const message = Object.values(err.errors).map(val => val.message).join(', ');
+        error = { statusCode: 400, message };
+    }
+
+    res.status(error.statusCode || 500).json({
+        success: false,
+        error: error.message || 'An unexpected server error occurred.',
+    });
+};
+
+module.exports = errorHandler;
+
+--------------------------------------------------
+
+middleware\security.js :
+// server/middleware/security.js
+const validateApiKey = (req, res, next) => {
+    // In a real MNC app, this would be a rotated key or OAuth token
+    // For this implementation, we check a header against env
+    const apiKey = req.headers['x-api-key'];
+    const validKey = process.env.API_SECRET_KEY || 'vision-ai-secure-key';
+
+    if (apiKey && apiKey === validKey) {
+        next();
+    } else {
+        res.status(401).json({ success: false, error: 'Unauthorized Access' });
+    }
+};
+
+module.exports = { validateApiKey };
+
+--------------------------------------------------
+
+models\Log.js :
+const mongoose = require('mongoose');
+
+const LogSchema = new mongoose.Schema({
+    lat: { type: Number, required: true },
+    lng: { type: Number, required: true },
+    note: { type: String, required: true },
+    type: {
+        type: String,
+        enum: ['hazard', 'sos', 'nav'],
+        required: true,
+    },
+    timestamp: { type: Date, default: Date.now },
+});
+
+module.exports = mongoose.model('Log', LogSchema);
+
+--------------------------------------------------
+
+routes\apiRoutes.js :
+const express = require('express');
+const { logHazard, sendSOS } = require('../controllers/logController');
+const { validateApiKey } = require('../middleware/security');
+const router = express.Router();
+
+// Apply security to all routes
+router.use(validateApiKey);
+
+router.post('/log-hazard', logHazard);
+router.post('/sos', sendSOS);
+
+module.exports = router;
+
+--------------------------------------------------
+

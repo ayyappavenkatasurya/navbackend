@@ -21,44 +21,47 @@ app.use(express.urlencoded({ extended: false }));
 app.use(helmet());
 
 // --- Security Middleware ---
-// Sanitize user-supplied data to prevent MongoDB operator injection
 app.use(mongoSanitize());
 
-// CORS Configuration
-const allowedOrigins = [
-    'http://localhost:5173',
-    'http://127.0.0.1:5173',
-    // Add your production domain here: e.g., 'https://your-vision-ai-app.com'
-];
+// --- Dynamic CORS for Local Network Testing ---
 app.use(cors({
     origin: function (origin, callback) {
-        if (!origin || allowedOrigins.indexOf(origin) !== -1) {
+        // Allow requests with no origin (like mobile apps or curl requests)
+        if (!origin) return callback(null, true);
+        
+        // Allow localhost, local network IPs (192.168.x.x), and production domains
+        if (allowedOrigins.indexOf(origin) !== -1 || 
+            origin.startsWith('http://192.168.') || 
+            origin.startsWith('http://localhost')) {
             callback(null, true);
         } else {
+            console.log("Blocked Origin:", origin);
             callback(new Error('Not allowed by CORS'));
         }
     }
 }));
 
+const allowedOrigins = [
+    'http://localhost:5173',
+    'http://127.0.0.1:5173',
+    // Add production domain here
+];
+
 // Rate Limiting
 const limiter = rateLimit({
-    windowMs: 15 * 60 * 1000, // 15 minutes
-    max: 100, // Limit each IP to 100 requests per windowMs
+    windowMs: 15 * 60 * 1000,
+    max: 200, // Increased slightly for navigation polling
     standardHeaders: true,
     legacyHeaders: false,
-    message: 'Too many requests from this IP, please try again after 15 minutes',
 });
 app.use(limiter);
 
-// --- Logging ---
-// Use morgan to log HTTP requests to the winston logger
 app.use(morgan('combined', { stream: logger.stream }));
 
 // --- API Routes ---
 app.get('/', (req, res) => res.json({ status: "VisionAI API is healthy" }));
 app.use('/api', require('./routes/apiRoutes'));
 
-// --- Error Handler ---
 app.use(errorHandler);
 
 const PORT = process.env.PORT || 5000;
